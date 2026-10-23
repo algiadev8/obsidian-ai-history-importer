@@ -84,7 +84,9 @@ function ensureHotReloadPlugin() {
 	}
 }
 
-ensureHotReloadPlugin();
+// Production and CI builds must not clone or install development plugins.
+const watch = process.argv.includes("--watch");
+if (watch) ensureHotReloadPlugin();
 
 const ctx = await esbuild.context({
 	entryPoints: ["src/main.ts"],
@@ -107,7 +109,7 @@ const ctx = await esbuild.context({
 	]
 });
 
-if (process.argv.includes("--watch")) {
+if (watch) {
 	await ctx.watch();
 	console.log("watching...");
 } else {

@@ -36,7 +36,20 @@ export interface ImportContext {
 }
 
 function normalizeVaultPath(vaultPath: VaultPathApi, input: string): string {
-	return vaultPath.normalize(input).replace(/^\/+/g, "").trim();
+	// Reject traversal before normalization can hide it. Configured directories may
+	// contain subfolders, but must always stay relative to the vault root.
+	const path = input.trim().replace(/\\/g, "/");
+	if (path.startsWith("/") || /^[a-z]:/i.test(path) || path.split("/").includes("..")) {
+		throw new Error(`Unsafe vault path: ${input}`);
+	}
+	return vaultPath
+		.normalize(
+			path
+				.split("/")
+				.filter((part) => part && part !== ".")
+				.join("/")
+		)
+		.replace(/\/$/, "");
 }
 
 async function ensureVaultFolder(
@@ -46,62 +59,72 @@ async function ensureVaultFolder(
 ): Promise<void> {
 	const normalized = normalizeVaultPath(vaultPath, dirPath);
 	if (!normalized) return;
-
-	const parts = normalized.split("/").filter(Boolean);
+	const parts = normalized.split("/").filter((part) => part && part !== ".");
 	let current = "";
 	for (const part of parts) {
 		current = current ? `${current}/${part}` : part;
-		if (!(await target.exists(current))) {
-			await target.createFolder(current);
+		if (!(await target.exists(current))) await target.createFolder(current);
+	}
+}
+
+function frontmatterValue(value: string): string | undefined {
+	const trimmed = value.trim();
+	if (trimmed.startsWith('"')) {
+		try {
+			const parsed: unknown = JSON.parse(trimmed);
+			return typeof parsed === "string" ? parsed : undefined;
+		} catch {
+			return undefined;
 		}
 	}
-}
-
-function extractConversationId(markdown: string): string | undefined {
-	if (!markdown.startsWith("---")) return;
-	const endIndex = markdown.indexOf("\n---", 3);
-	if (endIndex === -1) return;
-	const block = markdown.slice(3, endIndex).split("\n");
-	for (const line of block) {
-		const trimmed = line.trim();
-		if (!trimmed.startsWith("ai_conversation_id:")) continue;
-		const value = trimmed.split(":").slice(1).join(":").trim();
-		return value.replace(/^["']/, "").replace(/["']$/, "");
+	if (trimmed.startsWith("'")) {
+		return trimmed.endsWith("'") ? trimmed.slice(1, -1).replace(/''/g, "'") : undefined;
 	}
+	return trimmed.replace(/\s+#.*$/, "");
 }
 
-async function findExistingNoteByConversationId(
+function extractIdentity(markdown: string): { id: string; source?: string } | undefined {
+	const block = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown)?.[1];
+	if (block === undefined) return;
+	const idLine = /^ai_conversation_id:[ \t]*(.*)$/m.exec(block)?.[1];
+	if (idLine === undefined) return;
+	const id = frontmatterValue(idLine);
+	if (id === undefined) return;
+	const sourceLine = /^ai_source:[ \t]*(.*)$/m.exec(block)?.[1];
+	const source = sourceLine === undefined ? undefined : frontmatterValue(sourceLine);
+	// A malformed source is not a legacy note and must not be treated as a match.
+	if (sourceLine !== undefined && source === undefined) return;
+	return { id, source };
+}
+
+function identityKey(source: string | undefined, id: string): string {
+	return JSON.stringify([source ?? null, id]);
+}
+
+type NoteIndex = Map<string, string>;
+
+async function indexExistingNotes(
 	target: ImportTarget,
 	vaultPath: VaultPathApi,
-	conversationId: string,
 	notesDirectory: string
-): Promise<string | undefined> {
-	const files = await target.listMarkdownFiles();
-	const normalizedDir = normalizeVaultPath(vaultPath, notesDirectory);
-	const preferred: typeof files = [];
-	const fallback: typeof files = [];
-
-	for (const file of files) {
-		if (!normalizedDir) {
-			fallback.push(file);
-		} else if (file.path === normalizedDir || file.path.startsWith(`${normalizedDir}/`)) {
-			preferred.push(file);
-		} else {
-			fallback.push(file);
-		}
+): Promise<NoteIndex> {
+	const index: NoteIndex = new Map();
+	const root = normalizeVaultPath(vaultPath, notesDirectory);
+	// The current public target API lists the vault, but only notes in the configured
+	// subtree are read, and the list/read pass runs once for the entire import.
+	for (const file of await target.listMarkdownFiles()) {
+		const path = normalizeVaultPath(vaultPath, file.path);
+		if (root && !path.startsWith(`${root}/`)) continue;
+		const identity = extractIdentity(await target.readText(path));
+		if (!identity) continue;
+		const key = identityKey(identity.source, identity.id);
+		if (!index.has(key)) index.set(key, path);
 	}
-
-	const candidates = preferred.length > 0 ? [...preferred, ...fallback] : fallback;
-	for (const file of candidates) {
-		const content = await target.readText(file.path);
-		const found = extractConversationId(content);
-		if (found === conversationId) return file.path;
-	}
+	return index;
 }
 
 async function ensureUniqueVaultPath(target: ImportTarget, initialPath: string): Promise<string> {
 	if (!(await target.exists(initialPath))) return initialPath;
-
 	const base = initialPath.replace(/\.md$/, "");
 	let i = 2;
 	while (true) {
@@ -109,25 +132,6 @@ async function ensureUniqueVaultPath(target: ImportTarget, initialPath: string):
 		if (!(await target.exists(candidate))) return candidate;
 		i += 1;
 	}
-}
-
-async function ensureUniqueFilePath(target: ImportTarget, initialPath: string): Promise<string> {
-	if (!(await target.exists(initialPath))) return initialPath;
-	const extIndex = initialPath.lastIndexOf(".");
-	const hasExt = extIndex > -1;
-	const base = hasExt ? initialPath.slice(0, extIndex) : initialPath;
-	const ext = hasExt ? initialPath.slice(extIndex) : "";
-
-	let i = 2;
-	while (true) {
-		const candidate = `${base}-${i}${ext}`;
-		if (!(await target.exists(candidate))) return candidate;
-		i += 1;
-	}
-}
-
-function relativeLinkPath(vaultPath: VaultPathApi, targetPath: string): string {
-	return vaultPath.normalize(targetPath);
 }
 
 async function loadTemplate(
@@ -138,9 +142,7 @@ async function loadTemplate(
 	const customPath = options.customTemplatePath?.trim();
 	if (!customPath) return DEFAULT_MARKDOWN_TEMPLATE;
 	const normalized = normalizeVaultPath(vaultPath, customPath);
-	if (!normalized) {
-		throw new Error("Custom template path is empty");
-	}
+	if (!normalized) throw new Error("Custom template path is empty");
 	return target.readText(normalized);
 }
 
@@ -150,111 +152,58 @@ async function mergeConversationAttachments(
 	context: ImportContext
 ): Promise<void> {
 	const attachmentsRoot = normalizeVaultPath(context.vaultPath, options.attachmentsDirectory);
-	if (attachmentsRoot) {
-		await ensureVaultFolder(context.target, context.vaultPath, attachmentsRoot);
-	}
 	const copiedById = new Map<string, string>();
-
+	const equalBytes = (a: Uint8Array, b: Uint8Array) =>
+		a.length === b.length && a.every((byte, i) => byte === b[i]);
 	for (const message of conversation.messages) {
-		if (message.attachments.length === 0) continue;
 		for (const attachment of message.attachments) {
 			if (!attachment.sourcePath) continue;
-
-			let targetRelativePath = copiedById.get(attachment.id);
+			const attachmentKey = JSON.stringify([attachment.id, attachment.sourcePath]);
+			let targetRelativePath = copiedById.get(attachmentKey);
 			if (!targetRelativePath) {
 				const fileName = buildAttachmentFileName(
 					attachment.name,
 					attachment.sourcePath,
-					attachment.id
+					attachment.id,
+					identityKey(conversation.source, conversation.conversationId)
 				);
-				const initialPath = attachmentsRoot
-					? context.vaultPath.join(attachmentsRoot, fileName)
-					: fileName;
-				let finalPath = initialPath;
-				if (await context.target.exists(initialPath)) {
-					if (options.overwriteOnReimport) {
-						const data = await context.source.readBinary(attachment.sourcePath);
-						await ensureVaultFolder(
-							context.target,
-							context.vaultPath,
-							context.vaultPath.dirname(initialPath)
+				targetRelativePath = normalizeVaultPath(
+					context.vaultPath,
+					context.vaultPath.join(attachmentsRoot, fileName)
+				);
+				const data = await context.source.readBinary(attachment.sourcePath);
+				const initialPath = targetRelativePath;
+				const dot = fileName.lastIndexOf(".");
+				const base = dot > 0 ? initialPath.slice(0, -(fileName.length - dot)) : initialPath;
+				const ext = dot > 0 ? fileName.slice(dot) : "";
+				let suffix = 2;
+				while (await context.target.exists(targetRelativePath)) {
+					if (!context.target.readBinary)
+						throw new Error(
+							"Target cannot verify an existing attachment (readBinary is required)"
 						);
-						await context.target.writeBinary(initialPath, data);
-					} else {
-						finalPath = await ensureUniqueFilePath(context.target, initialPath);
-						const data = await context.source.readBinary(attachment.sourcePath);
-						await ensureVaultFolder(
-							context.target,
-							context.vaultPath,
-							context.vaultPath.dirname(finalPath)
-						);
-						await context.target.writeBinary(finalPath, data);
-					}
-				} else {
-					const data = await context.source.readBinary(attachment.sourcePath);
+					if (equalBytes(data, await context.target.readBinary(targetRelativePath)))
+						break;
+					// An existing path is never permission to overwrite unrelated data,
+					// including when the same exported ID was reused with different bytes.
+					targetRelativePath = `${base}-${suffix++}${ext}`;
+				}
+				if (!(await context.target.exists(targetRelativePath))) {
 					await ensureVaultFolder(
 						context.target,
 						context.vaultPath,
-						context.vaultPath.dirname(initialPath)
+						context.vaultPath.dirname(targetRelativePath)
 					);
-					await context.target.writeBinary(initialPath, data);
+					await context.target.writeBinary(targetRelativePath, data);
 				}
-				targetRelativePath = relativeLinkPath(context.vaultPath, finalPath);
-				copiedById.set(attachment.id, targetRelativePath);
+				copiedById.set(attachmentKey, targetRelativePath);
 			}
-
 			attachment.vaultPath = targetRelativePath;
 			attachment.obsidianLink = isImageMimeType(attachment.mimeType)
-				? `![[${relativeLinkPath(context.vaultPath, targetRelativePath)}]]`
-				: `[[${relativeLinkPath(context.vaultPath, targetRelativePath)}]]`;
+				? `![[${targetRelativePath}]]`
+				: `[[${targetRelativePath}]]`;
 		}
 	}
-}
-
-async function upsertNote(
-	target: ImportTarget,
-	vaultPath: VaultPathApi,
-	options: ImportOptions,
-	conversation: ConversationRecord,
-	markdown: string
-): Promise<{ path: string; skipped: boolean; overwritten: boolean }> {
-	const fileName = buildConversationFileName(
-		conversation.title,
-		conversation.conversationId,
-		conversation.createdAt
-	);
-	const requestedPath = normalizeVaultPath(
-		vaultPath,
-		vaultPath.join(options.notesDirectory, fileName)
-	);
-	await ensureVaultFolder(target, vaultPath, options.notesDirectory);
-	const existing = await target.exists(requestedPath);
-	if (existing) {
-		if (!options.overwriteOnReimport) {
-			return { path: requestedPath, skipped: true, overwritten: false };
-		}
-		await target.writeText(requestedPath, markdown);
-		return { path: requestedPath, skipped: false, overwritten: true };
-	}
-
-	const byIdPath = await findExistingNoteByConversationId(
-		target,
-		vaultPath,
-		conversation.conversationId,
-		options.notesDirectory
-	);
-	if (byIdPath) {
-		if (!options.overwriteOnReimport) {
-			return { path: byIdPath, skipped: true, overwritten: false };
-		}
-		await target.writeText(byIdPath, markdown);
-		return { path: byIdPath, skipped: false, overwritten: true };
-	}
-
-	const finalPath = await ensureUniqueVaultPath(target, requestedPath);
-	await ensureVaultFolder(target, vaultPath, vaultPath.dirname(finalPath));
-	await target.writeText(finalPath, markdown);
-	return { path: finalPath, skipped: false, overwritten: false };
 }
 
 export async function importConversationRecords(
@@ -263,8 +212,10 @@ export async function importConversationRecords(
 	context: ImportContext
 ): Promise<ImportResult> {
 	const template = await loadTemplate(context.target, context.vaultPath, options);
-	await ensureVaultFolder(context.target, context.vaultPath, options.notesDirectory);
-
+	const notesDirectory = normalizeVaultPath(context.vaultPath, options.notesDirectory);
+	// Validate both roots even if the first record has no attachments.
+	normalizeVaultPath(context.vaultPath, options.attachmentsDirectory);
+	const index = await indexExistingNotes(context.target, context.vaultPath, notesDirectory);
 	const errors: string[] = [];
 	let imported = 0;
 	let skipped = 0;
@@ -274,19 +225,39 @@ export async function importConversationRecords(
 	for (const conversation of conversations) {
 		let status: ImportProgress["status"] | undefined;
 		try {
-			await mergeConversationAttachments(conversation, options, context);
-			const markdown = renderConversationMarkdown(conversation, template);
-			const result = await upsertNote(
-				context.target,
-				context.vaultPath,
-				options,
-				conversation,
-				markdown
-			);
-			if (result.skipped) {
+			const key = identityKey(conversation.source, conversation.conversationId);
+			const legacyKey = identityKey(undefined, conversation.conversationId);
+			const existingPath = index.get(key) ?? index.get(legacyKey);
+			if (existingPath && !options.overwriteOnReimport) {
 				skipped += 1;
 				status = "skipped";
-			} else if (result.overwritten) {
+				continue;
+			}
+			const requestedPath = normalizeVaultPath(
+				context.vaultPath,
+				context.vaultPath.join(
+					notesDirectory,
+					buildConversationFileName(
+						conversation.title,
+						conversation.conversationId,
+						conversation.createdAt
+					)
+				)
+			);
+			// An occupied filename alone is never proof of identity.
+			const finalPath =
+				existingPath ?? (await ensureUniqueVaultPath(context.target, requestedPath));
+			await mergeConversationAttachments(conversation, options, context);
+			const markdown = renderConversationMarkdown(conversation, template);
+			await ensureVaultFolder(
+				context.target,
+				context.vaultPath,
+				context.vaultPath.dirname(finalPath)
+			);
+			await context.target.writeText(finalPath, markdown);
+			index.set(key, finalPath);
+			if (existingPath === index.get(legacyKey)) index.delete(legacyKey);
+			if (existingPath) {
 				overwritten += 1;
 				status = "overwritten";
 			} else {
@@ -311,6 +282,5 @@ export async function importConversationRecords(
 			});
 		}
 	}
-
 	return { imported, overwritten, skipped, errors };
 }

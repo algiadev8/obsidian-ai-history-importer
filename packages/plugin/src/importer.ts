@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import { normalizePath, TFile, type Vault } from "obsidian";
+import { normalizePath, type Vault } from "obsidian";
+import { createVaultTarget } from "./vault-target";
 import type {
 	ExportPathApi,
 	ExportSource,
@@ -13,15 +14,15 @@ import { importChatGptExport } from "@obsidian-ai-history-importer/chatgpt";
 import { importClaudeExport } from "@obsidian-ai-history-importer/claude";
 import type { ImporterPluginSettings } from "./settings";
 
+type HistoryImportResult = ImportResult & { warnings?: string[] };
+
 export async function importChatGptHistory(params: {
 	vault: Vault;
 	exportDirectory: string;
 	settings: ImporterPluginSettings;
 	onProgress?: (progress: ImportProgress) => void;
-}): Promise<ImportResult> {
+}): Promise<HistoryImportResult> {
 	const { vault, exportDirectory, settings, onProgress } = params;
-	const toArrayBuffer = (data: Uint8Array): ArrayBuffer =>
-		data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 
 	const exportSource: ExportSource = {
 		readText: (path) => fs.readFile(path, "utf8"),
@@ -45,40 +46,7 @@ export async function importChatGptHistory(params: {
 		}
 	};
 
-	const target: ImportTarget = {
-		listMarkdownFiles: async () =>
-			vault.getMarkdownFiles().map((file) => ({ path: file.path })),
-		readText: async (path) => {
-			const file = vault.getAbstractFileByPath(path);
-			if (!file || !(file instanceof TFile)) {
-				throw new Error(`Missing file: ${path}`);
-			}
-			return vault.cachedRead(file);
-		},
-		writeText: async (path, content) => {
-			const existing = vault.getAbstractFileByPath(path);
-			if (existing && existing instanceof TFile) {
-				await vault.modify(existing, content);
-				return;
-			}
-			await vault.create(path, content);
-		},
-		writeBinary: async (path, data) => {
-			const existing = vault.getAbstractFileByPath(path);
-			const buffer = toArrayBuffer(data);
-			if (existing && existing instanceof TFile) {
-				await vault.modifyBinary(existing, buffer);
-				return;
-			}
-			await vault.createBinary(path, buffer);
-		},
-		createFolder: async (path) => {
-			if (!vault.getAbstractFileByPath(path)) {
-				await vault.createFolder(path);
-			}
-		},
-		exists: async (path) => Boolean(vault.getAbstractFileByPath(path))
-	};
+	const target: ImportTarget = createVaultTarget(vault);
 
 	const exportPath: ExportPathApi = {
 		join: (...parts) => join(...parts)
@@ -103,6 +71,7 @@ export async function importChatGptHistory(params: {
 			customTemplatePath: settings.customTemplatePath,
 			includeSystemMessages: settings.includeSystemMessages,
 			includeHiddenMessages: settings.includeHiddenMessages,
+			includeAllBranches: settings.includeAllBranches,
 			excludeThoughts: settings.excludeThoughts,
 			excludeToolCalls: settings.excludeToolCalls,
 			excludeThoughtTime: settings.excludeThoughtTime,
@@ -120,10 +89,8 @@ export async function importClaudeHistory(params: {
 	exportDirectory: string;
 	settings: ImporterPluginSettings;
 	onProgress?: (progress: ImportProgress) => void;
-}): Promise<ImportResult> {
+}): Promise<HistoryImportResult> {
 	const { vault, exportDirectory, settings, onProgress } = params;
-	const toArrayBuffer = (data: Uint8Array): ArrayBuffer =>
-		data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 
 	const exportSource: ExportSource = {
 		readText: (path) => fs.readFile(path, "utf8"),
@@ -147,40 +114,7 @@ export async function importClaudeHistory(params: {
 		}
 	};
 
-	const target: ImportTarget = {
-		listMarkdownFiles: async () =>
-			vault.getMarkdownFiles().map((file) => ({ path: file.path })),
-		readText: async (path) => {
-			const file = vault.getAbstractFileByPath(path);
-			if (!file || !(file instanceof TFile)) {
-				throw new Error(`Missing file: ${path}`);
-			}
-			return vault.cachedRead(file);
-		},
-		writeText: async (path, content) => {
-			const existing = vault.getAbstractFileByPath(path);
-			if (existing && existing instanceof TFile) {
-				await vault.modify(existing, content);
-				return;
-			}
-			await vault.create(path, content);
-		},
-		writeBinary: async (path, data) => {
-			const existing = vault.getAbstractFileByPath(path);
-			const buffer = toArrayBuffer(data);
-			if (existing && existing instanceof TFile) {
-				await vault.modifyBinary(existing, buffer);
-				return;
-			}
-			await vault.createBinary(path, buffer);
-		},
-		createFolder: async (path) => {
-			if (!vault.getAbstractFileByPath(path)) {
-				await vault.createFolder(path);
-			}
-		},
-		exists: async (path) => Boolean(vault.getAbstractFileByPath(path))
-	};
+	const target: ImportTarget = createVaultTarget(vault);
 
 	const exportPath: ExportPathApi = {
 		join: (...parts) => join(...parts)

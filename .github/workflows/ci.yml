@@ -24,7 +24,10 @@ jobs:
                   cache: pnpm
 
             - name: Install
-              run: pnpm install
+              run: pnpm install --frozen-lockfile
+
+            - name: Check formatting
+              run: pnpm run format:check
 
             - name: Lint
               run: pnpm run lint
@@ -34,3 +37,9 @@ jobs:
 
             - name: Build
               run: pnpm run build
+
+            - name: Typecheck plugin
+              run: pnpm --filter plugin exec tsc --noEmit -p tsconfig.json
+
+            - name: Check generated output does not break lint
+              run: pnpm run lint

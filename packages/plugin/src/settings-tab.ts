@@ -27,7 +27,9 @@ export class ImporterSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Custom template path")
-			.setDesc("Optional absolute file path. If empty, default template is used")
+			.setDesc(
+				"Optional vault-relative template path. If empty, the default template is used."
+			)
 			.addText((text) =>
 				text.setValue(this.plugin.settings.customTemplatePath).onChange(async (value) => {
 					this.plugin.settings.customTemplatePath = value;
@@ -85,6 +87,18 @@ export class ImporterSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Include all conversation branches")
+			.setDesc(
+				"Also imports alternate replies and edited prompts, with parent node references. Off imports only the current branch."
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.includeAllBranches).onChange(async (value) => {
+					this.plugin.settings.includeAllBranches = value;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
 			.setName("Exclude reasoning messages")
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			.setDesc('Skips ChatGPT messages with content type "thoughts".')
@@ -97,7 +111,9 @@ export class ImporterSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Exclude tool call payloads")
-			.setDesc("Skips tool input JSON blocks (search_query, open, screenshot, etc.)")
+			.setDesc(
+				"Skips assistant messages explicitly routed to tools. Unmarked JSON answers are preserved."
+			)
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.excludeToolCalls).onChange(async (value) => {
 					this.plugin.settings.excludeToolCalls = value;
@@ -107,7 +123,11 @@ export class ImporterSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Exclude thinking time lines")
-			.setDesc('Skips messages like "思考時間: 2m 54s"')
+			.setDesc(
+				// Exported labels are quoted verbatim.
+				// eslint-disable-next-line obsidianmd/ui/sentence-case
+				'Skips reasoning recaps and timing-only messages such as "Thought for 2m" or "33s考えました".'
+			)
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.excludeThoughtTime).onChange(async (value) => {
 					this.plugin.settings.excludeThoughtTime = value;

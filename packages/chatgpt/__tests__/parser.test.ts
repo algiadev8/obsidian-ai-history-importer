@@ -162,6 +162,7 @@ describe("parseChatGptConversations", () => {
 							message: {
 								id: "m2",
 								author: { role: "assistant" },
+								recipient: "web.run",
 								content: {
 									content_type: "text",
 									parts: [

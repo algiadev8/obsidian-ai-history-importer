@@ -15,6 +15,8 @@ export interface ExportSource {
 export interface ImportTarget {
 	listMarkdownFiles(): Promise<Array<{ path: string }>>;
 	readText(path: string): Promise<string>;
+	/** Needed to safely reuse existing attachments without trusting filenames. */
+	readBinary?(path: string): Promise<Uint8Array>;
 	writeText(path: string, content: string): Promise<void>;
 	writeBinary(path: string, data: Uint8Array): Promise<void>;
 	createFolder(path: string): Promise<void>;

@@ -10,20 +10,15 @@ import type {
 	ChatGptMessage
 } from "./types";
 
+import {
+	collectAttachments,
+	collectContentStrings,
+	extractMessageText,
+	inferMimeType
+} from "./content";
+import { selectNodes } from "./branches";
+
 const SKIPPED_CONTENT_TYPES = new Set(["user_editable_context"]);
-const TOOL_PAYLOAD_KEYS = new Set([
-	"search_query",
-	"open",
-	"click",
-	"find",
-	"screenshot",
-	"image_query",
-	"weather",
-	"finance",
-	"sports",
-	"calculator",
-	"time"
-]);
 
 export interface ParseOptions {
 	includeSystemMessages?: boolean;
@@ -32,11 +27,16 @@ export interface ParseOptions {
 	excludeToolCalls?: boolean;
 	excludeThoughtTime?: boolean;
 	resolveAttachmentPath?: AttachmentPathResolver;
+	resolveAttachmentMetadata?: (attachment: ChatGptAttachment) => ChatGptAttachment;
+	/** Opt in to retaining every branch, with parent metadata on each message. */
+	includeAllBranches?: boolean;
+	onWarning?: (warning: string) => void;
 }
 
 function toIsoDate(value?: number | null): string | undefined {
-	if (typeof value !== "number" || Number.isNaN(value)) return undefined;
-	return new Date(value * 1000).toISOString();
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	const date = new Date(value * 1000);
+	return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
 function getMessageTimestamp(message: ConversationMessage): number | undefined {
@@ -61,71 +61,28 @@ function getConversationUpdatedAt(messages: ConversationMessage[]): string | und
 	return new Date(Math.max(...timestamps)).toISOString();
 }
 
-function extractMessageText(message: ChatGptMessage): string {
-	const content = message.content;
-	if (!content) return "";
-
-	switch (content.content_type) {
-		case "text":
-		case "multimodal_text":
-			if (Array.isArray(content.parts)) {
-				return content.parts
-					.filter((part): part is string => typeof part === "string")
-					.join("\n\n")
-					.trim();
-			}
-			return "";
-		case "code":
-		case "execution_output":
-			return typeof content.text === "string" ? content.text.trim() : "";
-		case "reasoning_recap":
-			return typeof content.content === "string" ? content.content.trim() : "";
-		default:
-			return JSON.stringify(content, null, 2);
-	}
-}
-
-function collectContentStrings(message: ChatGptMessage): string[] {
-	const content = message.content;
-	if (!content) return [];
-
-	const parts = Array.isArray(content.parts)
-		? content.parts.filter((part): part is string => typeof part === "string")
-		: [];
-	const text = typeof content.text === "string" ? [content.text] : [];
-	const inlineContent = typeof content.content === "string" ? [content.content] : [];
-
-	return [...parts, ...text, ...inlineContent];
-}
-
-function isToolPayloadString(value: string): boolean {
-	const trimmed = value.trim();
-	if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return false;
-	try {
-		const parsed: unknown = JSON.parse(trimmed);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-		return Object.keys(parsed as Record<string, unknown>).some((key) =>
-			TOOL_PAYLOAD_KEYS.has(key)
-		);
-	} catch {
-		return false;
-	}
-}
-
 function isToolCallMessage(message: ChatGptMessage): boolean {
-	return collectContentStrings(message).some((content) => isToolPayloadString(content));
+	if (message.author?.role !== "assistant") return false;
+	const recipient = message.recipient ?? message.metadata?.recipient;
+	// JSON keys alone are not provenance: an ordinary answer can contain
+	// "time", "open", or even "search_query". Keep ambiguous content losslessly.
+	return (
+		(typeof recipient === "string" && recipient.length > 0 && recipient !== "all") ||
+		(Array.isArray(message.metadata?.tool_calls) && message.metadata.tool_calls.length > 0)
+	);
 }
 
 function isThoughtTimeMessage(message: ChatGptMessage): boolean {
+	if (message.author?.role !== "assistant") return false;
+	if (message.content?.content_type === "reasoning_recap") return true;
 	const contents = collectContentStrings(message).map((content) => content.trim());
 	if (contents.length !== 1) return false;
 	const [only] = contents;
-	return (
-		only.startsWith("思考時間:") ||
-		only.startsWith("Thought time:") ||
-		/^思考時間:\s*\d/.test(only) ||
-		/^Thought time:\s*\d/.test(only)
-	);
+	const duration = String.raw`(?:\d+(?:\.\d+)?\s*(?:h|m|s|時間|分|秒)\s*)+`;
+	return new RegExp(
+		`^(?:(?:思考時間|Thought time)[:：]\\s*${duration}|(?:Thought|Worked) for\\s+${duration}|${duration}考えました)[.!。]?$`,
+		"i"
+	).test(only);
 }
 
 export type AttachmentPathResolver = (attachment: ChatGptAttachment) => string | undefined;
@@ -138,28 +95,14 @@ function mapAttachment(
 	return {
 		id: attachment.id,
 		name: attachment.name,
-		mimeType: attachment.mime_type,
+		mimeType:
+			attachment.mime_type ??
+			attachment.mimeType ??
+			inferMimeType(attachment.name) ??
+			(attachment.isImage ? "image/*" : undefined),
 		sizeBytes: attachment.size,
 		sourcePath
 	};
-}
-
-function selectPathNodes(conversation: ChatGptConversation): ChatGptMappingNode[] {
-	const mapping = conversation.mapping ?? {};
-	const current = conversation.current_node;
-	if (!current || !mapping[current]) {
-		return Object.values(mapping);
-	}
-
-	const ordered: ChatGptMappingNode[] = [];
-	let nodeId: string | null | undefined = current;
-	while (nodeId) {
-		const currentNode: ChatGptMappingNode | undefined = mapping[nodeId];
-		if (!currentNode) break;
-		ordered.push(currentNode);
-		nodeId = currentNode.parent;
-	}
-	return ordered.reverse();
 }
 
 function mapMessage(
@@ -169,7 +112,8 @@ function mapMessage(
 	includeHiddenMessages: boolean,
 	excludeThoughts: boolean,
 	excludeToolCalls: boolean,
-	excludeThoughtTime: boolean
+	excludeThoughtTime: boolean,
+	resolveMetadata: NonNullable<ParseOptions["resolveAttachmentMetadata"]>
 ): ConversationMessage | null {
 	const message = node.message;
 	if (!message?.id) return null;
@@ -182,8 +126,8 @@ function mapMessage(
 	if (excludeToolCalls && isToolCallMessage(message)) return null;
 	if (excludeThoughtTime && isThoughtTimeMessage(message)) return null;
 
-	const attachments = (message.metadata?.attachments ?? [])
-		.filter((attachment): attachment is ChatGptAttachment => Boolean(attachment?.id))
+	const attachments = collectAttachments(message)
+		.map(resolveMetadata)
 		.map((attachment) => mapAttachment(attachment, resolveAttachmentPath));
 
 	return {
@@ -206,6 +150,7 @@ export function parseChatGptConversations(
 	const excludeToolCalls = options.excludeToolCalls ?? false;
 	const excludeThoughtTime = options.excludeThoughtTime ?? false;
 	const resolveAttachmentPath = options.resolveAttachmentPath ?? (() => undefined);
+	const resolveMetadata = options.resolveAttachmentMetadata ?? ((attachment) => attachment);
 	const seenConversationKeys = new Set<string>();
 
 	const output: ConversationRecord[] = [];
@@ -217,18 +162,31 @@ export function parseChatGptConversations(
 		if (seenConversationKeys.has(importKey)) continue;
 		seenConversationKeys.add(importKey);
 
-		const messages = selectPathNodes(conversation)
-			.map((node) =>
-				mapMessage(
+		const { nodes, currentIds } = selectNodes(
+			conversation,
+			options.includeAllBranches,
+			options.onWarning
+		);
+		const messages = nodes
+			.map(([nodeId, node]) => {
+				const message = mapMessage(
 					node,
 					resolveAttachmentPath,
 					includeSystemMessages,
 					includeHiddenMessages,
 					excludeThoughts,
 					excludeToolCalls,
-					excludeThoughtTime
-				)
-			)
+					excludeThoughtTime,
+					resolveMetadata
+				);
+				if (message && options.includeAllBranches)
+					message.metadata = {
+						nodeId,
+						parentNodeId: node.parent ?? null,
+						branch: currentIds.has(nodeId) ? "current" : "alternate"
+					};
+				return message;
+			})
 			.filter((message): message is ConversationMessage => Boolean(message))
 			.filter((message) => message.content.length > 0 || message.attachments.length > 0);
 

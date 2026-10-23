@@ -64,6 +64,13 @@ function createImportTarget() {
 			if (!entry || entry.kind !== "text") throw new Error(`Missing text: ${path}`);
 			return entry.content;
 		},
+		readBinary: async (path) => {
+			const entry = files.get(path);
+			if (!entry) throw new Error(`Missing binary: ${path}`);
+			return entry.kind === "binary"
+				? entry.content
+				: new TextEncoder().encode(entry.content);
+		},
 		writeText: async (path, content) => {
 			files.set(path, { kind: "text", content });
 		},
@@ -105,6 +112,127 @@ function buildConversationJson(attachmentId: string) {
 		}
 	]);
 }
+
+describe("asset recovery and manifest validation", () => {
+	async function run(
+		textFiles: Map<string, string>,
+		binaryFiles = new Map<string, Uint8Array>()
+	) {
+		const entries = [...binaryFiles.keys()].map((path) => ({
+			path,
+			name: path.split("/").pop()!,
+			isFile: true,
+			isDirectory: false
+		}));
+		const { target, files } = createImportTarget();
+		const result = await importChatGptExport({
+			options: {
+				exportDir: "/export",
+				notesDirectory: "notes",
+				attachmentsDirectory: "attachments",
+				overwriteOnReimport: true
+			},
+			source: createExportSource(textFiles, binaryFiles, new Map([["/export", entries]])),
+			target,
+			exportPath: createExportPathApi(),
+			vaultPath: createVaultPathApi()
+		});
+		return { result, files };
+	}
+	it("recovers a metadata-free image using pointer and asset-name map", async () => {
+		const data = JSON.parse(buildConversationJson("unused"));
+		delete data[0].mapping.n1.message.metadata;
+		data[0].mapping.n1.message.content = {
+			content_type: "multimodal_text",
+			parts: [
+				{ content_type: "image_asset_pointer", asset_pointer: "file-service://file-img" }
+			]
+		};
+		const { result, files } = await run(
+			new Map([
+				["/export/conversations.json", JSON.stringify(data)],
+				[
+					"/export/conversation_asset_file_names.json",
+					JSON.stringify({ "file-img.dat": "画像.png" })
+				]
+			]),
+			new Map([["/export/file-img.dat", new Uint8Array([1, 2, 3])]])
+		);
+		expect(result.imported).toBe(1);
+		expect(result.warnings).toEqual([]);
+		const binaryPath = [...files.keys()].find((path) => path.startsWith("attachments/"))!;
+		expect(binaryPath).toMatch(/\.png$/);
+		const note = [...files.values()].find((e) => e.kind === "text")!;
+		expect(note.content).toContain(`![[${binaryPath}]]`);
+	});
+	it("recovers exact library origins without attaching unrelated library files", async () => {
+		const data = JSON.parse(buildConversationJson("unused"));
+		delete data[0].mapping.n1.message.metadata;
+		const { result, files } = await run(
+			new Map([
+				["/export/conversations.json", JSON.stringify(data)],
+				[
+					"/export/library_files.json",
+					JSON.stringify([
+						{
+							file_id: "file_doc",
+							file_name: "report.pdf",
+							origination_thread_id: "c1",
+							origination_message_id: "m1"
+						},
+						{
+							file_id: "file_other",
+							file_name: "other.pdf",
+							origination_thread_id: "different",
+							origination_message_id: "m1"
+						}
+					])
+				]
+			]),
+			new Map([
+				["/export/file_doc.dat", new Uint8Array([1])],
+				["/export/file_other.dat", new Uint8Array([2])]
+			])
+		);
+		expect(result.imported).toBe(1);
+		expect([...files.keys()].filter((p) => p.startsWith("attachments/"))).toHaveLength(1);
+		expect([...files.keys()].join()).toContain("file_doc");
+	});
+	it("reports absent or ambiguous assets rather than guessing a binary", async () => {
+		const { result, files } = await run(
+			new Map([["/export/conversations.json", buildConversationJson("file-aaa")]]),
+			new Map([
+				["/export/file-aaa-one.png", new Uint8Array([1])],
+				["/export/file-aaa-two.png", new Uint8Array([2])]
+			])
+		);
+		expect(result.warnings).toEqual(["Ambiguous exported attachment: file-aaa"]);
+		expect([...files.keys()].some((p) => p.startsWith("attachments/"))).toBe(false);
+		const missing = await run(
+			new Map([["/export/conversations.json", buildConversationJson("file-missing")]])
+		);
+		expect(missing.result.warnings).toEqual(["Missing exported attachment: file-missing"]);
+	});
+	it.each([
+		"../secret.json",
+		"/secret.json",
+		"C:\\secret.json",
+		"conversations-000.json/../../secret"
+	])("rejects manifest traversal: %s", async (file) => {
+		await expect(
+			run(
+				new Map([
+					[
+						"/export/export_manifest.json",
+						JSON.stringify({
+							logical_files: { "conversations.json": { files: [file] } }
+						})
+					]
+				])
+			)
+		).rejects.toThrow("Invalid conversation shard path");
+	});
+});
 
 describe("importChatGptExport", () => {
 	it("imports sharded conversations listed in export manifest", async () => {
@@ -210,10 +338,13 @@ describe("importChatGptExport", () => {
 		});
 
 		expect(result.imported).toBe(1);
-		expect(files.has("attachments/photo.jpg")).toBe(true);
+		const attachmentPath = [...files.keys()].find(
+			(path) => path.startsWith("attachments/") && path.endsWith(".jpg")
+		)!;
+		expect(attachmentPath).toContain("file-aaa");
 		const notePath = [...files.keys()].find((path) => path.endsWith(".md"))!;
 		const content = (files.get(notePath) as { kind: "text"; content: string }).content;
-		expect(content).toContain("![[attachments/photo.jpg]]");
+		expect(content).toContain(`![[${attachmentPath}]]`);
 	});
 
 	it("respects attachment scan depth", async () => {

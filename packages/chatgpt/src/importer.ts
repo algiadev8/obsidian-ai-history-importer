@@ -7,7 +7,8 @@ import type {
 	VaultPathApi
 } from "@obsidian-ai-history-importer/core";
 import { importConversationRecords } from "@obsidian-ai-history-importer/core";
-import { parseChatGptConversations, type AttachmentPathResolver } from "./parser";
+import { parseChatGptConversations } from "./parser";
+import { createAttachmentResolver, readAssetMetadata, type AttachmentIndexEntry } from "./assets";
 import type { ChatGptConversation } from "./types";
 
 export interface ChatGptImportOptions extends ImportOptions {
@@ -18,11 +19,7 @@ export interface ChatGptImportOptions extends ImportOptions {
 	excludeToolCalls?: boolean;
 	excludeThoughtTime?: boolean;
 	attachmentScanDepth?: number;
-}
-
-interface AttachmentIndexEntry {
-	name: string;
-	path: string;
+	includeAllBranches?: boolean;
 }
 
 interface ExportManifestLogicalFile {
@@ -75,10 +72,13 @@ async function resolveConversationShardPaths(
 		const raw = await source.readText(manifestPath);
 		const parsed = JSON.parse(raw) as ExportManifest;
 		const files = parsed.logical_files?.["conversations.json"]?.files;
-		if (Array.isArray(files)) {
-			return files
-				.filter((file): file is string => typeof file === "string")
-				.map((file) => exportPath.join(exportDir, file));
+		if (Array.isArray(files) && files.length > 0) {
+			return files.map((file: unknown) => {
+				if (typeof file !== "string" || !/^conversations-\d+\.json$/.test(file)) {
+					throw new Error("Invalid conversation shard path in export_manifest.json");
+				}
+				return exportPath.join(exportDir, file);
+			});
 		}
 	}
 
@@ -119,36 +119,13 @@ async function buildAttachmentIndex(
 	return files;
 }
 
-function createAttachmentResolver(files: AttachmentIndexEntry[]): AttachmentPathResolver {
-	const cache = new Map<string, string | undefined>();
-	return (attachment) => {
-		const cached = cache.get(attachment.id);
-		if (cached !== undefined || cache.has(attachment.id)) return cached;
-
-		for (const entry of files) {
-			if (
-				entry.name.startsWith(attachment.id) &&
-				(entry.name.length === attachment.id.length ||
-					entry.name[attachment.id.length] === "-" ||
-					entry.name[attachment.id.length] === ".")
-			) {
-				cache.set(attachment.id, entry.path);
-				return entry.path;
-			}
-		}
-
-		cache.set(attachment.id, undefined);
-		return undefined;
-	};
-}
-
 export async function importChatGptExport(params: {
 	options: ChatGptImportOptions;
 	source: ExportSource;
 	target: ImportTarget;
 	exportPath: ExportPathApi;
 	vaultPath: VaultPathApi;
-}): Promise<ImportResult> {
+}): Promise<ImportResult & { warnings: string[] }> {
 	const { options, source, target, exportPath, vaultPath } = params;
 	const trimmedExportDir = options.exportDir.trim();
 	if (!trimmedExportDir) {
@@ -157,8 +134,18 @@ export async function importChatGptExport(params: {
 
 	const conversations = await readConversationsFile(trimmedExportDir, source, exportPath);
 	const scanDepth = options.attachmentScanDepth ?? 6;
+	if (!Number.isInteger(scanDepth) || scanDepth < 0)
+		throw new Error("Invalid attachment scan depth");
+	const warnings: string[] = [];
+	const onWarning = (warning: string) => warnings.push(warning);
 	const attachmentIndex = await buildAttachmentIndex(trimmedExportDir, source, scanDepth);
-	const resolveAttachmentPath = createAttachmentResolver(attachmentIndex);
+	const resolveAttachmentPath = createAttachmentResolver(attachmentIndex, onWarning);
+	const resolveAttachmentMetadata = await readAssetMetadata(
+		trimmedExportDir,
+		source,
+		exportPath,
+		conversations
+	);
 
 	const parsed = parseChatGptConversations(conversations, {
 		includeSystemMessages: options.includeSystemMessages,
@@ -166,12 +153,16 @@ export async function importChatGptExport(params: {
 		excludeThoughts: options.excludeThoughts,
 		excludeToolCalls: options.excludeToolCalls,
 		excludeThoughtTime: options.excludeThoughtTime,
-		resolveAttachmentPath
+		resolveAttachmentPath,
+		resolveAttachmentMetadata,
+		includeAllBranches: options.includeAllBranches,
+		onWarning
 	});
 
-	return importConversationRecords(parsed, options, {
+	const result = await importConversationRecords(parsed, options, {
 		source,
 		target,
 		vaultPath
 	});
+	return { ...result, warnings };
 }

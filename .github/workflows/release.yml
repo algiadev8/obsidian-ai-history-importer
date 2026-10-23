@@ -27,7 +27,7 @@ jobs:
                   cache: pnpm
 
             - name: Install
-              run: pnpm install
+              run: pnpm install --frozen-lockfile
 
             - name: Validate release tag and metadata
               run: |
@@ -41,8 +41,23 @@ jobs:
 
                   node -e "const fs=require('fs');const versions=require('./packages/plugin/versions.json');if(!versions['${TAG}']){console.error('packages/plugin/versions.json must contain a mapping for '+ '${TAG}');process.exit(1)}"
 
+            - name: Check formatting
+              run: pnpm run format:check
+
+            - name: Lint
+              run: pnpm run lint
+
+            - name: Test
+              run: pnpm run test
+
             - name: Build
-              run: pnpm pnpm run build
+              run: pnpm run build
+
+            - name: Typecheck plugin
+              run: pnpm --filter plugin exec tsc --noEmit -p tsconfig.json
+
+            - name: Check generated output does not break lint
+              run: pnpm run lint
 
             - name: Ensure release assets exist
               run: |

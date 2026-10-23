@@ -23,6 +23,7 @@ function normalizePersistedData(raw: unknown): PersistedData {
 
 export default class ImporterPlugin extends Plugin {
 	settings: ImporterPluginSettings = { ...DEFAULT_SETTINGS };
+	private importing = false;
 
 	async onload() {
 		await this.loadSettings();
@@ -48,6 +49,11 @@ export default class ImporterPlugin extends Plugin {
 	}
 
 	async runImport(source: "chatgpt" | "claude"): Promise<void> {
+		if (this.importing) {
+			new Notice("An import is already running.");
+			return;
+		}
+		this.importing = true;
 		type UpdatableNotice = Notice & { setMessage: (message: string) => void; hide: () => void };
 		let notice: UpdatableNotice | undefined;
 
@@ -92,6 +98,13 @@ export default class ImporterPlugin extends Plugin {
 			if (notice) {
 				notice.hide();
 			}
+			if (result.warnings?.length) {
+				console.warn("[obsidian-ai-history-importer] import warnings", result.warnings);
+				new Notice(
+					`Import has ${result.warnings.length} warnings. See the developer console for details.`,
+					15000
+				);
+			}
 			if (result.errors.length > 0) {
 				new Notice(
 					`Import finished: imported=${result.imported}, overwritten=${result.overwritten}, skipped=${result.skipped}, errors=${result.errors.length}`,
@@ -112,6 +125,8 @@ export default class ImporterPlugin extends Plugin {
 				12000
 			);
 			console.error("[obsidian-ai-history-importer] import failed", error);
+		} finally {
+			this.importing = false;
 		}
 	}
 

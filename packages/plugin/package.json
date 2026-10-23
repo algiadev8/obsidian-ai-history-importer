@@ -1,12 +1,13 @@
 {
 	"name": "plugin",
-	"version": "0.0.7",
+	"version": "0.1.0",
 	"private": true,
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs --watch",
 		"build": "node esbuild.config.mjs",
-		"lint": "eslint ."
+		"lint": "eslint .",
+		"test": "node --test __tests__/*.test.mjs"
 	},
 	"dependencies": {
 		"@obsidian-ai-history-importer/claude": "workspace:*",

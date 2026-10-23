@@ -3,6 +3,28 @@ import { renderConversationMarkdown } from "../src";
 import type { ConversationRecord } from "../src";
 
 describe("renderConversationMarkdown", () => {
+	it("retains custom frontmatter while owning and escaping identity fields", () => {
+		const conversation: ConversationRecord = {
+			source: "chatgpt",
+			conversationId: 'id"\\nnext',
+			importKey: 'chatgpt:id"\\nnext',
+			title: "Title",
+			messages: []
+		};
+		const template =
+			'---\ntags: [chat]\nai_conversation_id: "wrong"\nai_source: "wrong"\n---\n# Custom';
+		const output = renderConversationMarkdown(conversation, template);
+		expect(output).toContain("tags: [chat]");
+		expect(output).toContain("# Custom");
+		expect(output).not.toContain('ai_source: "wrong"');
+		expect(JSON.parse(/^ai_conversation_id: (.+)$/m.exec(output)![1])).toBe(
+			conversation.conversationId
+		);
+		const normal = renderConversationMarkdown(conversation);
+		expect(JSON.parse(/^ai_conversation_id: (.+)$/m.exec(normal)![1])).toBe(
+			conversation.conversationId
+		);
+	});
 	it("renders the default markdown template", () => {
 		const conversation: ConversationRecord = {
 			source: "chatgpt",
