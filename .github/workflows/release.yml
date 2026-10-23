@@ -41,6 +41,9 @@ jobs:
 
                   node -e "const fs=require('fs');const versions=require('./packages/plugin/versions.json');if(!versions['${TAG}']){console.error('packages/plugin/versions.json must contain a mapping for '+ '${TAG}');process.exit(1)}"
 
+            - name: Audit dependencies
+              run: pnpm audit
+
             - name: Check formatting
               run: pnpm run format:check
 

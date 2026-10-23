@@ -484,7 +484,10 @@ describe("import identity and side-effect regressions", () => {
 		);
 		expect(result.overwritten).toBe(1);
 		expect([...files.keys()]).toEqual(before);
-		const note = noteContent(files, before.find((path) => path.startsWith("notes/"))!);
+		const note = noteContent(
+			files,
+			before.find((path) => path.startsWith("notes/"))!
+		);
 		for (const [path] of binaries) expect(note).toContain(`![[${path}]]`);
 	});
 

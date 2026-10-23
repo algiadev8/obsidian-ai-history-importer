@@ -15,11 +15,18 @@
 		"version:minor": "pnpm run version:bump minor",
 		"version:major": "pnpm run version:bump major"
 	},
+	"pnpm": {
+		"overrides": {
+			"vite": "^7.3.7",
+			"obsidian>moment": "^2.31.0"
+		}
+	},
 	"devDependencies": {
-		"@types/node": "^25.2.2",
-		"esbuild": "^0.27.3",
-		"eslint": "^9.39.2",
-		"prettier": "^3.8.1",
-		"typescript": "^5.5.4"
+		"@types/node": "^25.9.9",
+		"esbuild": "^0.28.2",
+		"eslint": "^9.39.5",
+		"prettier": "^3.9.10",
+		"typescript": "^5.9.3",
+		"vite": "^7.3.7"
 	}
 }

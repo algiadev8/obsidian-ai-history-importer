@@ -24,6 +24,7 @@
 
 - Fix the release workflow build command and use frozen dependency installation.
 - Keep production/CI builds from cloning or installing the development hot-reload plugin.
+- Classify coverage tooling and the host SDK as development-only dependencies, update compatible tooling/transitives, and pin patched Vite and SDK Moment dependencies. Audit development and production dependencies before release.
 
 ### Migration notes
 

@@ -16,7 +16,7 @@ function normalizePersistedData(raw: unknown): PersistedData {
 	if (!isObject(raw)) return {};
 	const data: PersistedData = {};
 	if (isObject(raw.settings)) {
-		data.settings = raw.settings as Partial<ImporterPluginSettings>;
+		data.settings = raw.settings;
 	}
 	return data;
 }
@@ -54,8 +54,7 @@ export default class ImporterPlugin extends Plugin {
 			return;
 		}
 		this.importing = true;
-		type UpdatableNotice = Notice & { setMessage: (message: string) => void; hide: () => void };
-		let notice: UpdatableNotice | undefined;
+		let notice: Notice | undefined;
 
 		try {
 			const exportDirectory = await promptExportDirectory(this.app, "");
@@ -66,7 +65,7 @@ export default class ImporterPlugin extends Plugin {
 			const lastUpdate = { time: 0 };
 			const updateNotice = (text: string): void => {
 				if (!notice) {
-					notice = new Notice(text, 0) as UpdatableNotice;
+					notice = new Notice(text, 0);
 					return;
 				}
 				notice.setMessage(text);
