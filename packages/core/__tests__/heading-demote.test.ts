@@ -10,6 +10,10 @@ describe("demoteHeadings", () => {
 		expect(output).toContain("body text");
 	});
 
+	it("keeps existing heading serialization stable across toolchain updates", () => {
+		expect(demoteHeadings("### **example_name**\n", 2)).toBe("##### **example\\_name**\n");
+	});
+
 	it("clamps depth at 6", () => {
 		const input = "##### Deep\n";
 		const output = demoteHeadings(input, 2);
